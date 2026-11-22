@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>河道流向更正与汇水表</title>
+  <style>
+    :root {
+      --blue: #1f6feb; --green: #1a7f37; --red: #cf222e;
+      --border: #d0d7de; --bg: #f6f8fa; --text: #1f2328;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; font-family: "PingFang SC", "Microsoft YaHei",
+        "Helvetica Neue", Arial, sans-serif; color: var(--text);
+      background: var(--bg); line-height: 1.55;
+    }
+    .wrap { max-width: 1080px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: #57606a; font-size: 13px; margin-bottom: 20px; }
+    .card {
+      background: #fff; border: 1px solid var(--border); border-radius: 8px;
+      padding: 16px 18px; margin-bottom: 16px;
+    }
+    .card h2 { font-size: 16px; margin: 0 0 12px; }
+    label { font-size: 13px; font-weight: 600; display: block; margin-bottom: 6px; }
+    input[type=file], textarea {
+      width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px; border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 10px; background: #fff;
+    }
+    textarea { min-height: 150px; resize: vertical; }
+    button, .btn {
+      display: inline-block; border: 1px solid var(--border); border-radius: 6px;
+      padding: 7px 16px; font-size: 14px; cursor: pointer; background: #f6f8fa;
+      color: var(--text); text-decoration: none; margin-right: 8px;
+    }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    button.green { background: var(--green); border-color: var(--green); color: #fff; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .hint { font-size: 12px; color: #57606a; margin-top: 8px; }
+    .msg { border-radius: 6px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px;
+      display: none; white-space: pre-wrap; }
+    .msg.ok { display: block; background: #dafbe1; border: 1px solid #4ac26b; color: #116329; }
+    .msg.err { display: block; background: #ffebe9; border: 1px solid #ff8182; color: #a40e26; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: center; }
+    th { background: #f6f8fa; position: sticky; top: 0; }
+    .table-box { max-height: 420px; overflow: auto; border: 1px solid var(--border);
+      border-radius: 6px; }
+    .pill { display: inline-block; background: #ddf4ff; border: 1px solid #54aeff;
+      color: #0969da; border-radius: 999px; padding: 2px 10px; font-size: 12px;
+      margin-right: 6px; }
+    .muted { color: #57606a; font-size: 12px; }
+    code { background: #eff1f3; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>河道流向更正与汇水表系统</h1>
+  <div class="sub">
+    导入流向 CSV（每行：格点行列号 + 一个上下左右相邻的下游格，出口留空）；
+    一次可提交多格更正，系统只重算更正格及其更正前后可到达的下游格，
+    结果与整图重算一致；出现环、下游无效或保存失败时，原流向与汇水表保持不变。
+  </div>
+
+  <div id="msg" class="msg"></div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>① 导入流向 CSV</h2>
+      <label for="file">CSV 文件（表头 row,col,down_row,down_col，出口下游两列留空）</label>
+      <input type="file" id="file" accept=".csv,text/csv">
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btn-import">导入并全量重算</button>
+        <a class="btn" href="/api/sample">下载 4×4 示例 CSV</a>
+      </div>
+      <div class="hint">导入会在一个事务内整体替换旧数据；新数据非法（环 / 下游无效 / 非相邻）时旧数据不受影响。</div>
+    </div>
+
+    <div class="card">
+      <h2>② 批量更正流向</h2>
+      <label for="changes">JSON 批次（down_row/down_col 同时置 null 表示改为出口）</label>
+      <textarea id="changes">[
+  {"row": 0, "col": 0, "down_row": 1, "down_col": 0},
+  {"row": 1, "col": 3, "down_row": null, "down_col": null}
+]</textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="green" id="btn-correct">提交本批更正（增量重算）</button>
+      </div>
+      <div class="hint">同一格在一批里只能出现一次；批次失败（环 / 下游无效 / 保存失败）时不写入任何改动。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>③ 当前数据与下载</h2>
+    <div class="row" style="margin-bottom:12px">
+      <span class="pill" id="stat-count">格点数：-</span>
+      <button id="btn-refresh">刷新</button>
+      <a class="btn" href="/download/flow.csv">下载流向表 flow_direction.csv</a>
+      <a class="btn" href="/download/accumulation.csv">下载汇水表 accumulation.csv</a>
+    </div>
+    <div class="table-box">
+      <table>
+        <thead>
+          <tr><th>行 row</th><th>列 col</th><th>下游行</th><th>下游列</th>
+              <th>汇水格数（含自身）</th></tr>
+        </thead>
+        <tbody id="grid-body">
+          <tr><td colspan="5" class="muted">尚未导入数据</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="hint" id="trunc-note"></div>
+  </div>
+
+  <div class="card">
+    <h2>更正/导入历史（最近 20 条）</h2>
+    <table>
+      <thead><tr><th>#</th><th>类型</th><th>更正格</th><th>受影响格数</th><th>时间 (UTC)</th></tr></thead>
+      <tbody id="hist-body"><tr><td colspan="5" class="muted">暂无</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function showMessage(ok, text) {
+  const el = $("msg");
+  el.className = "msg " + (ok ? "ok" : "err");
+  el.textContent = text;
+}
+
+function blank(v) { return v === null || v === undefined || v === ""; }
+
+async function refreshState() {
+  const resp = await fetch("/api/state");
+  const data = await resp.json();
+  $("stat-count").textContent = "格点数：" + data.cell_count;
+  const body = $("grid-body");
+  if (!data.cell_count) {
+    body.innerHTML = '<tr><td colspan="5" class="muted">尚未导入数据</td></tr>';
+  } else {
+    body.innerHTML = data.cells.map(c => `
+      <tr>
+        <td>${c.row}</td><td>${c.col}</td>
+        <td>${blank(c.down_row) ? "—（出口）" : c.down_row}</td>
+        <td>${blank(c.down_col) ? "—（出口）" : c.down_col}</td>
+        <td><b>${c.accum}</b></td>
+      </tr>`).join("");
+  }
+  $("trunc-note").textContent = data.truncated
+    ? "格点较多，页面仅展示前 " + data.cells.length + " 格；下载 CSV 包含全部格点。"
+    : "";
+
+  const hist = $("hist-body");
+  if (!data.corrections || !data.corrections.length) {
+    hist.innerHTML = '<tr><td colspan="5" class="muted">暂无</td></tr>';
+  } else {
+    hist.innerHTML = data.corrections.map(h => {
+      const changed = JSON.parse(h.changed);
+      const affected = JSON.parse(h.affected);
+      const kind = h.kind === "import" ? "导入" : "批次更正";
+      return `<tr><td>${h.id}</td><td>${kind}</td>
+        <td><code>${changed.length ? JSON.stringify(changed) : "整图"}</code></td>
+        <td>${affected.length}</td><td>${h.created_at}</td></tr>`;
+    }).join("");
+  }
+}
+
+$("btn-import").addEventListener("click", async () => {
+  const f = $("file").files[0];
+  if (!f) { showMessage(false, "请先选择 CSV 文件"); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    const resp = await fetch("/api/import", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "导入失败");
+    showMessage(true, "✔ " + data.message + "（出口 " + data.outlet_count + " 个）");
+    await refreshState();
+  } catch (e) {
+    showMessage(false, "✘ " + e.message + "\n旧流向与汇水表保持不变，可直接下载核对。");
+  }
+});
+
+$("btn-correct").addEventListener("click", async () => {
+  let payload;
+  try { payload = JSON.parse($("changes").value); }
+  catch (e) { showMessage(false, "✘ JSON 解析失败：" + e.message); return; }
+  try {
+    const resp = await fetch("/api/correct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "更正失败");
+    const detail = data.new_values.map(v =>
+      `格(${v.row},${v.col}) 新汇水=${v.accum}`).join("\n");
+    showMessage(true, "✔ " + data.message + "\n受影响格：" +
+      JSON.stringify(data.affected) + "\n" + detail);
+    await refreshState();
+  } catch (e) {
+    showMessage(false, "✘ " + e.message + "\n本批未生效，旧流向与汇水表保持不变，可直接下载核对。");
+  }
+});
+
+$("btn-refresh").addEventListener("click", () => refreshState().catch(
+  e => showMessage(false, "✘ 刷新失败：" + e.message)));
+
+refreshState().catch(e => showMessage(false, "✘ 初始化失败：" + e.message));
+</script>
+</body>
+</html>

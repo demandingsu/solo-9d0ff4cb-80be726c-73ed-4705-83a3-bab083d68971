@@ -1,0 +1,16 @@
+services:
+  flow-app:
+    build: .
+    image: river-flow-correction:latest
+    container_name: river-flow-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - flow-data:/data
+    environment:
+      FLOW_DB_PATH: /data/flow.db
+      MAX_GRID_DISPLAY: "400"
+    restart: unless-stopped
+
+volumes:
+  flow-data:
