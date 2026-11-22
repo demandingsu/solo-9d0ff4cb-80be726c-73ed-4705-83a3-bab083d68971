@@ -60,11 +60,13 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>河道流向更正与汇水表系统</h1>
+  <h1>河道流向更正与跨测区汇水汇总</h1>
   <div class="sub">
     导入流向 CSV（每行：格点行列号 + 一个上下左右相邻的下游格，出口留空）；
     一次可提交多格更正，系统只重算更正格及其更正前后可到达的下游格，
     结果与整图重算一致；出现环、下游无效或保存失败时，原流向与汇水表保持不变。
+    跨测区协作时，各组填测区矩形范围并上传局部流向 CSV 生成测区包，
+    汇总员一次上传多个互不重叠测区包即可按真实出口统计各测区格数与合计。
   </div>
 
   <div id="msg" class="msg"></div>
@@ -115,6 +117,68 @@
       </table>
     </div>
     <div class="hint" id="trunc-note"></div>
+  </div>
+
+  <div class="card">
+    <h2>④ 生成测区包（跨测区交接）</h2>
+    <div class="sub" style="margin-bottom:12px">
+      填写本测区的矩形行列范围（闭区间），上传该测区现有格式的流向 CSV。
+      下游留空表示真实出口，也可指向区外的上下左右相邻格；
+      区内引用缺格或成环时会指出位置并退回文件。
+    </div>
+    <div class="grid2">
+      <div>
+        <label for="region-id">测区编号</label>
+        <input type="text" id="region-id" placeholder="例如 R1" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px">
+        <div class="row" style="margin-top:10px">
+          <label style="margin:0">行范围</label>
+          <input type="number" id="row-min" value="0" min="0" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+          <span>到</span>
+          <input type="number" id="row-max" value="3" min="0" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+          <label style="margin:0">列范围</label>
+          <input type="number" id="col-min" value="0" min="0" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+          <span>到</span>
+          <input type="number" id="col-max" value="3" min="0" style="width:90px;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+        </div>
+      </div>
+      <div>
+        <label for="region-file">该测区流向 CSV</label>
+        <input type="file" id="region-file" accept=".csv,text/csv">
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="btn-package">生成并下载测区包 JSON</button>
+          <a class="btn" href="/api/sample">下载 4×4 示例 CSV</a>
+        </div>
+      </div>
+    </div>
+    <div class="hint">
+      测区包只包含边界格、跨区去向、真实出口与各终结格的汇总格数，
+      记录数只随边界格和出口数量增长，不随区内格点数增长。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>⑤ 汇总多个测区包</h2>
+    <div class="sub" style="margin-bottom:12px">
+      一次选择多个互不重叠测区的 JSON 包，只凭这些包列出汇入每个真实出口的
+      各测区格数及合计。缺少跨区接收格或拼接后成环时，指出断点或环上的边界格，
+      整批退回。
+    </div>
+    <label for="summary-files">测区包 JSON（可多选）</label>
+    <input type="file" id="summary-files" accept=".json,application/json" multiple>
+    <div class="row" style="margin-top:10px">
+      <button class="green" id="btn-summary">汇总所有包</button>
+    </div>
+    <div class="table-box" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr><th>真实出口（行,列）</th><th>测区</th><th>汇入格数</th><th>合计</th></tr>
+        </thead>
+        <tbody id="summary-body">
+          <tr><td colspan="4" class="muted">尚未汇总</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="hint" id="summary-note"></div>
   </div>
 
   <div class="card">
@@ -207,6 +271,70 @@ $("btn-correct").addEventListener("click", async () => {
     await refreshState();
   } catch (e) {
     showMessage(false, "✘ " + e.message + "\n本批未生效，旧流向与汇水表保持不变，可直接下载核对。");
+  }
+});
+
+$("btn-package").addEventListener("click", async () => {
+  const f = $("region-file").files[0];
+  if (!f) { showMessage(false, "请先选择该测区的流向 CSV"); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("region_id", $("region-id").value.trim());
+  fd.append("row_min", $("row-min").value);
+  fd.append("row_max", $("row-max").value);
+  fd.append("col_min", $("col-min").value);
+  fd.append("col_max", $("col-max").value);
+  try {
+    const resp = await fetch("/api/region/package", { method: "POST", body: fd });
+    if (!resp.ok) {
+      let detail = "生成测区包失败";
+      try { const j = await resp.json(); detail = j.error || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const blob = await resp.blob();
+    let filename = "region.json";
+    const disp = resp.headers.get("Content-Disposition") || "";
+    const m = disp.match(/filename\*=UTF-8''([^;]+)/);
+    if (m) filename = decodeURIComponent(m[1]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    showMessage(true, "✔ 测区包已生成并下载：" + filename);
+  } catch (e) {
+    showMessage(false, "✘ " + e.message + "\n该测区文件已退回，未生成测区包。");
+  }
+});
+
+$("btn-summary").addEventListener("click", async () => {
+  const files = $("summary-files").files;
+  if (!files.length) { showMessage(false, "请先选择至少一个测区包 JSON"); return; }
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f, f.name);
+  try {
+    const resp = await fetch("/api/region/summary", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "汇总失败");
+    const body = $("summary-body");
+    if (!data.outlets.length) {
+      body.innerHTML = '<tr><td colspan="4" class="muted">没有真实出口</td></tr>';
+    } else {
+      body.innerHTML = data.outlets.map(o => o.regions.map((r, i) => `
+        <tr>
+          ${i === 0 ? `<td rowspan="${o.regions.length}">(${o.row},${o.col})</td>` : ""}
+          <td>${r.region_id}</td><td><b>${r.cells}</b></td>
+          ${i === 0 ? `<td rowspan="${o.regions.length}"><b>${o.total}</b></td>` : ""}
+        </tr>`).join("")).join("");
+    }
+    $("summary-note").textContent =
+      "已汇总 " + data.regions.length + " 个测区，共 " + data.total_cells +
+      " 格；合计与拼成整图后逐格追流一致。";
+    showMessage(true, "✔ 汇总完成：" + data.outlets.length + " 个真实出口。");
+  } catch (e) {
+    $("summary-body").innerHTML =
+      '<tr><td colspan="4" class="muted">整批已退回</td></tr>';
+    $("summary-note").textContent = "";
+    showMessage(false, "✘ " + e.message + "\n整批测区包已退回，未产生部分结果。");
   }
 });
 

@@ -1,4 +1,4 @@
-# 河道流向更正与汇水表系统（Flask + SQLite）
+# 河道流向更正与跨测区汇水汇总（Flask + SQLite）
 
 河道测绘员改正栅格流向后，把新的汇水表交给 GIS 的网页工具。
 
@@ -8,17 +8,20 @@
 - **批次交错**：后生效的批次读取的是此前已提交批次的最新流向，自动纳入先前更正。
 - **失败安全**：整批出现环、下游无效（不存在/非四邻域/自环）或数据库保存失败时，事务回滚，**原流向和汇水表照常可用、可下载**。
 - **下载**：流向表 `flow_direction.csv` 与汇水表 `accumulation.csv`。
+- **跨测区交接**：各组填矩形行列范围、上传局部流向 CSV，下载 JSON 测区包；
+  汇总员一次上传多个互不重叠测区的包，只凭包列出汇入每个真实出口的各测区格数及合计。
 
 ## 目录结构
 
 ```
 app/
   flow.py      纯算法：CSV 解析、合法性/环校验、全量重算、增量更正
+  regions.py   纯算法：测区包生成/校验、跨测区压缩图汇总
   db.py        SQLite 持久化：导入/更正均为单事务，进程内写锁串行化
   app.py       Flask 路由与应用工厂
   templates/index.html  单页界面（原生 JS，无外部依赖）
-tests/         pytest：算法单测、60 组随机性质测试、接口/回滚/并发测试
-sample/        4×4 示例流向 CSV
+tests/         pytest：算法单测、随机性质测试、接口/回滚/并发测试、跨测区汇总测试
+sample/        4×4 示例流向 CSV；regions/ 下拆分左右两测区的示例 CSV
 Dockerfile, docker-compose.yml, requirements.txt
 ```
 
@@ -88,10 +91,87 @@ row,col,down_row,down_col
 | POST | `/api/correct` | 批量更正，增量重算 |
 | GET | `/api/state` | 当前网格、累积值、最近 20 条导入/更正历史 |
 | GET | `/api/sample` | 下载 4×4 示例 CSV |
+| POST | `/api/region/package` | 上传某测区 CSV + 表单范围，下载 JSON 测区包 |
+| POST | `/api/region/summary` | 一次上传多个测区包（字段 `files`），返回按出口汇总 |
 | GET | `/download/flow.csv` | 下载当前流向表 |
 | GET | `/download/accumulation.csv` | 下载当前汇水表 |
 
 业务错误统一返回 `400 {"ok": false, "error": ...}`；无数据时下载返回 `409`。
+
+## 跨测区测区包
+
+### 生成（各组）
+
+网页填测区编号与矩形行列范围（闭区间），上传该测区现有格式的流向 CSV
+（全局行列号，无需裁剪成局部坐标）：
+
+```text
+POST /api/region/package      multipart: file=CSV, region_id, row_min, row_max, col_min, col_max
+```
+
+校验（失败即退回文件并指出位置）：
+
+- CSV 格点必须都在给定矩形内；
+- 区内下游必须在该 CSV 中存在，否则报“区内引用缺格：格点 (r,c) 的下游 (r',c') …”；
+- 跨区下游必须四邻域相邻（“下游留空 = 真实出口”仍照旧）；
+- 区内成环时报出“环上格点：(r,c) -> …”。
+
+成功时返回/下载 `<region_id>.region.json`，结构：
+
+```json
+{
+  "format": "flow-region-package", "version": 1,
+  "region_id": "R1",
+  "row_min": 0, "row_max": 3, "col_min": 0, "col_max": 1,
+  "cell_count": 8,
+  "boundary": [{"row": 0, "col": 1, "terminal_row": 0, "terminal_col": 1}],
+  "terminals": [
+    {"row": 0, "col": 1, "cells": 4, "down_row": 0, "down_col": 2},
+    {"row": 3, "col": 0, "cells": 2, "down_row": null, "down_col": null}
+  ]
+}
+```
+
+- `boundary`：矩形四周的边界格，以及它在**本区内**沿流路最终到达的终结格；
+- `terminals`：区内终结格。`down_row/down_col` 填 `null` 表示真实出口，
+  否则是跨区去向；`cells` 是本区内最终汇到该终结格的格数（含自身）。
+  各 `cells` 之和等于 `cell_count`。
+
+**记录数只随边界格和终结格（跨区出口 + 真实出口）数量增长**，与区内格点数无关；
+包内不含任何逐格明细。例如 20×20 全向下流的测区有 400 格，包内只有
+76 个边界格 + 1 个终结格。
+
+### 汇总（汇总员）
+
+```text
+POST /api/region/summary      multipart: files=包1.json, files=包2.json, ...
+```
+
+只凭这些包工作，返回：
+
+```json
+{"ok": true,
+ "outlets": [
+   {"row": 3, "col": 3, "total": 16,
+    "regions": [{"region_id": "R1", "cells": 8}, {"region_id": "R2", "cells": 8}]}
+ ],
+ "regions": [{"region_id": "R1", "cell_count": 8, "row_min": 0, "...": "..."}],
+ "total_cells": 16}
+```
+
+汇总把每个终结格当成带权节点，指向目标测区接收格的终结格；压缩图上求
+最终出口后按“格点自身所属测区”累加，因此**流路反复进出同一测区，每格也只
+按自身所属测区计一次**。结果与把所有测区拼成整图后逐格追流一致
+（`tests/test_regions.py` 用暴力追流作参考实现逐出口断言）。
+
+整批拒绝并指出位置的情形：
+
+- 缺少跨区接收格：某跨区去向不属于任何已上传测区，或目标测区矩形内没有该接收边界格
+  （报“断点”，带两侧格点坐标）；
+- 拼接后成环：报出“环上的边界格：区域 'A' 边界格 (r,c) -> 区域 'B' 边界格 …”；
+- 测区矩形重叠、测区编号重复、包格式/版本/汇总格数不一致。
+
+失败时不返回任何部分结果。
 
 ## 测试
 

@@ -6,6 +6,7 @@ import io
 import json
 import os
 from typing import Optional
+from urllib.parse import quote
 
 from flask import (
     Flask,
@@ -30,6 +31,11 @@ from .flow import (
     FlowError,
     dump_flow_csv,
     parse_flow_csv,
+)
+from .regions import (
+    RegionError,
+    build_region_package,
+    summarize_packages,
 )
 
 
@@ -250,6 +256,71 @@ def create_app(db_path: Optional[str] = None) -> Flask:
             mimetype="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=sample_flow.csv"},
         )
+
+    # ------------------------------------------------------------------ #
+    # 跨测区：生成测区包 / 汇总多个测区包
+    # ------------------------------------------------------------------ #
+    @app.post("/api/region/package")
+    def api_region_package():
+        upload = request.files.get("file")
+        if upload is None:
+            raise RegionError("缺少上传文件字段 file（该测区的流向 CSV）")
+        try:
+            text = upload.read().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise RegionError("CSV 必须是 UTF-8 编码")
+        edges = parse_flow_csv(text)
+
+        def form_int(name: str) -> int:
+            raw = request.form.get(name)
+            if raw is None or raw.strip() == "":
+                raise RegionError(f"缺少测区范围参数 {name}")
+            try:
+                return int(raw)
+            except ValueError:
+                raise RegionError(f"测区范围参数 {name} 必须是整数：{raw!r}")
+
+        package = build_region_package(
+            request.form.get("region_id", ""),
+            form_int("row_min"),
+            form_int("row_max"),
+            form_int("col_min"),
+            form_int("col_max"),
+            edges,
+        )
+        filename = f"{package['region_id']}.region.json"
+        # safe="" 会把斜杠、换行等一并百分号编码，避免文件名/响应头注入
+        return Response(
+            json.dumps(package, ensure_ascii=False, indent=2),
+            mimetype="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename*=UTF-8''" + quote(filename, safe="")
+                )
+            },
+        )
+
+    @app.post("/api/region/summary")
+    def api_region_summary():
+        uploads = request.files.getlist("files")
+        if not uploads:
+            uploads = request.files.getlist("file")
+        if not uploads:
+            raise RegionError("缺少上传文件字段 files（可一次选择多个测区包）")
+
+        payloads = []
+        for idx, upload in enumerate(uploads, start=1):
+            name = upload.filename or f"第 {idx} 个文件"
+            try:
+                payloads.append(json.loads(upload.read().decode("utf-8-sig")))
+            except UnicodeDecodeError:
+                raise RegionError(f"测区包 {name!r} 必须是 UTF-8 编码")
+            except json.JSONDecodeError as exc:
+                raise RegionError(f"测区包 {name!r} 不是合法 JSON：{exc.msg}")
+
+        result = summarize_packages(payloads)
+        result["ok"] = True
+        return jsonify(result)
 
     @app.errorhandler(409)
     def handle_409(exc):
